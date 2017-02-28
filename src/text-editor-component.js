@@ -29,6 +29,8 @@ class TextEditorComponent {
     this.horizontalPixelPositionsByScreenLineId = new Map() // Values are maps from column to horiontal pixel positions
     this.lineNodesByScreenLineId = new Map()
     this.textNodesByScreenLineId = new Map()
+    this.pendingAutoscroll = null
+    this.autoscrollTop = -1
     this.lastKeydown = null
     this.lastKeydownBeforeKeypress = null
     this.openedAccentedCharacterMenu = false
@@ -74,14 +76,25 @@ class TextEditorComponent {
       measureLongestLine = true
     }
 
+    if (this.pendingAutoscroll) {
+      this.autoscrollVertically()
+    }
+
     this.horizontalPositionsToMeasure.clear()
     etch.updateSync(this)
+
+    if (this.autoscrollTop >= 0) {
+      this.refs.scroller.scrollTop = this.autoscrollTop
+      this.autoscrollTop = -1
+    }
     if (measureLongestLine) this.measureLongestLineWidth(longestLine)
     this.queryCursorsToRender()
     this.measureHorizontalPositions()
     this.positionCursorsToRender()
 
     etch.updateSync(this)
+
+    this.pendingAutoscroll = null
   }
 
   render () {
@@ -490,8 +503,9 @@ class TextEditorComponent {
   }
 
   didScroll () {
-    this.measureScrollPosition()
-    this.updateSync()
+    if (this.measureScrollPosition()) {
+      this.updateSync()
+    }
   }
 
   didResize () {
@@ -566,6 +580,58 @@ class TextEditorComponent {
     this.lastKeydown = null
   }
 
+  didRequestAutoscroll (autoscroll) {
+    this.pendingAutoscroll = autoscroll
+    this.scheduleUpdate()
+  }
+
+  autoscrollVertically () {
+    const {screenRange, options} = this.pendingAutoscroll
+
+    const scrollTop = this.measurements.scrollTop
+    const scrollBottom = scrollTop + this.measurements.scrollerHeight
+    const screenRangeTop = this.pixelTopForScreenRow(screenRange.start.row)
+    const screenRangeBottom = this.pixelTopForScreenRow(screenRange.end.row) + this.measurements.lineHeight
+    const verticalScrollMargin = this.getVerticalScrollMargin()
+
+    let desiredScrollTop, desiredScrollBottom
+    if (options && options.center) {
+      const desiredScrollCenter = (screenRangeTop + screenRangeBottom) / 2
+      if (desiredScrollCenter < scrollTop || desiredScrollCenter > scrollBottom) {
+        desiredScrollTop = desiredScrollCenter - this.measurements.scrollerHeight / 2
+        desiredScrollBottom = desiredScrollCenter + this.measurements.scrollerHeight / 2
+      }
+    } else {
+      desiredScrollTop = screenRangeTop - verticalScrollMargin
+      desiredScrollBottom = screenRangeBottom + verticalScrollMargin
+    }
+
+    if (!options || options.reversed !== false) {
+      if (desiredScrollTop < scrollTop) {
+        this.autoscrollTop = desiredScrollTop
+        this.measurements.scrollTop = desiredScrollTop
+      } else if (desiredScrollBottom > scrollBottom) {
+        this.autoscrollTop = desiredScrollBottom - this.measurements.scrollerHeight
+        this.measurements.scrollTop = this.autoscrollTop
+      }
+    } else {
+      if (desiredScrollBottom > scrollBottom) {
+        this.autoscrollTop = desiredScrollBottom - this.measurements.scrollerHeight
+        this.measurements.scrollTop = this.autoscrollTop
+      } else if (desiredScrollTop < scrollTop) {
+        this.autoscrollTop = desiredScrollTop
+        this.measurements.scrollTop = desiredScrollTop
+      }
+    }
+  }
+
+  getVerticalScrollMargin () {
+    return Math.min(
+     this.getModel().verticalScrollMargin * this.measurements.lineHeight,
+     ((this.getLastVisibleRow() - this.getFirstVisibleRow()) * this.measurements.lineHeight) / 2
+   )
+  }
+
   performInitialMeasurements () {
     this.measurements = {}
     this.staleMeasurements = {}
@@ -591,8 +657,17 @@ class TextEditorComponent {
   }
 
   measureScrollPosition () {
-    this.measurements.scrollTop = this.refs.scroller.scrollTop
-    this.measurements.scrollLeft = this.refs.scroller.scrollLeft
+    let scrollPositionChanged = false
+    const {scrollTop, scrollLeft} = this.refs.scroller
+    if (scrollTop !== this.measurements.scrollTop) {
+      this.measurements.scrollTop = scrollTop
+      scrollPositionChanged = true
+    }
+    if (scrollLeft !== this.measurements.scrollLeft) {
+      this.measurements.scrollLeft = scrollLeft
+      scrollPositionChanged = true
+    }
+    return scrollPositionChanged
   }
 
   measureCharacterDimensions () {
@@ -706,6 +781,7 @@ class TextEditorComponent {
     const scheduleUpdate = this.scheduleUpdate.bind(this)
     this.disposables.add(model.selectionsMarkerLayer.onDidUpdate(scheduleUpdate))
     this.disposables.add(model.displayLayer.onDidChangeSync(scheduleUpdate))
+    this.disposables.add(model.onDidRequestAutoscroll(this.didRequestAutoscroll.bind(this)))
   }
 
   isVisible () {
